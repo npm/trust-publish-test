@@ -1,31 +1,113 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine.
+# CircleCI Trusted Publishing Test
 # See: https://circleci.com/docs/reference/configuration-reference
 version: 2.1
 
-# Define a job to be invoked later in a workflow.
-# See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#jobs-overview & https://circleci.com/docs/reference/configuration-reference/#jobs
 jobs:
-  say-hello:
-    # Specify the execution environment. You can specify an image from Docker Hub or use one of our convenience images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/guides/execution-managed/executor-intro/ & https://circleci.com/docs/reference/configuration-reference/#executor-job
+  publish:
     docker:
-      # Specify the version you desire here
-      # See: https://circleci.com/developer/images/image/cimg/base
-      - image: cimg/base:current
-
-    # Add steps to the job
-    # See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#steps-overview & https://circleci.com/docs/reference/configuration-reference/#steps
+      - image: cimg/node:lts
     steps:
-      # Checkout the code as the first step.
       - checkout
+      
       - run:
-          name: "Say hello"
-          command: "echo Hello, World!"
+          name: "Install dependencies"
+          command: npm install
+      
+      - run:
+          name: "Get OIDC token with npm audience"
+          command: |
+            # Get OIDC token with custom audience for npm
+            OIDC_TOKEN=$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')
+            
+            # Save token to environment for next step
+            echo "export OIDC_TOKEN='${OIDC_TOKEN}'" >> "$BASH_ENV"
+      
+      - run:
+          name: "Exchange OIDC token for npm token"
+          command: |
+            # URL-encode the package name (@ becomes %40, / becomes %2F)
+            PACKAGE_NAME="@npm/trust-publish-test"
+            ENCODED_PACKAGE_NAME=$(echo "$PACKAGE_NAME" | sed 's/@/%40/g' | sed 's/\//%2F/g')
+            
+            # Exchange OIDC token for npm registry token
+            RESPONSE=$(curl -s -X POST \
+              "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${ENCODED_PACKAGE_NAME}" \
+              -H "Authorization: Bearer ${OIDC_TOKEN}" \
+              -H "Content-Type: application/json")
+            
+            echo "Token exchange response received"
+            
+            # Extract npm token from response
+            NPM_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+            
+            if [ "$NPM_TOKEN" = "null" ] || [ -z "$NPM_TOKEN" ]; then
+              echo "Failed to get npm token. Response:"
+              echo "$RESPONSE" | jq '.'
+              exit 1
+            fi
+            
+            echo "Successfully obtained npm token"
+            
+            # Configure npm to use the token
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+      
+      - run:
+          name: "Publish to npm"
+          command: |
+            # Bump version for each publish (using build number for uniqueness)
+            npm version 0.0.${CIRCLE_BUILD_NUM} --no-git-tag-version --allow-same-version || true
+            
+            # Publish the package
+            npm publish --access public
+            
+            echo "Successfully published @npm/trust-publish-test"
 
-# Orchestrate jobs using workflows
-# See: https://circleci.com/docs/guides/orchestrate/workflows/ & https://circleci.com/docs/reference/configuration-reference/#workflows
+  debug-claims:
+    # Debug job to inspect OIDC token claims without publishing
+    docker:
+      - image: cimg/node:lts
+    steps:
+      - checkout
+      
+      - run:
+          name: "Inspect OIDC token claims"
+          command: |
+            echo "=== Getting OIDC token with npm audience ==="
+            OIDC_TOKEN=$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')
+            
+            echo ""
+            echo "=== Decoded JWT payload (claims) ==="
+            echo "$OIDC_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '.' || echo "Failed to decode"
+            
+            echo ""
+            echo "=== Key claims for npm trusted publishing ==="
+            PAYLOAD=$(echo "$OIDC_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null)
+            echo "iss: $(echo "$PAYLOAD" | jq -r '.iss')"
+            echo "aud: $(echo "$PAYLOAD" | jq -r '.aud')"
+            echo "sub: $(echo "$PAYLOAD" | jq -r '.sub')"
+            echo "org-id: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/org-id"')"
+            echo "project-id: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/project-id"')"
+            echo "pipeline-definition-id: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/pipeline-definition-id"')"
+            echo "context-ids: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/context-ids"')"
+            echo "vcs-origin: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/vcs-origin"')"
+            echo "vcs-ref: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/vcs-ref"')"
+            echo "ssh-rerun: $(echo "$PAYLOAD" | jq -r '."oidc.circleci.com/ssh-rerun"')"
+
 workflows:
-  say-hello-workflow: # This is the name of the workflow, feel free to change it to better match your workflow.
-    # Inside the workflow, you define the jobs you want to run.
+  # Main publish workflow - triggered manually or on release
+  publish-workflow:
     jobs:
-      - say-hello
+      - publish:
+          context:
+            - main-context
+          filters:
+            branches:
+              only:
+                - main
+  
+  # Debug workflow - for testing claim structure
+  debug-workflow:
+    jobs:
+      - debug-claims:
+          context:
+            - main-context
