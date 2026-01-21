@@ -14,50 +14,16 @@ jobs:
           command: npm install
       
       - run:
-          name: "Get OIDC token with npm audience"
+          name: "Publish to npm with OIDC"
           command: |
-            # Get OIDC token with custom audience for npm
-            OIDC_TOKEN=$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')
+            # Get OIDC token and set as NPM_ID_TOKEN
+            # npm CLI will automatically exchange this for an npm token
+            export NPM_ID_TOKEN=$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')
             
-            # Save token to environment for next step
-            echo "export OIDC_TOKEN='${OIDC_TOKEN}'" >> "$BASH_ENV"
-      
-      - run:
-          name: "Exchange OIDC token for npm token"
-          command: |
-            # URL-encode the package name (@ becomes %40, / becomes %2F)
-            PACKAGE_NAME="@npm/trust-publish-test"
-            ENCODED_PACKAGE_NAME=$(echo "$PACKAGE_NAME" | sed 's/@/%40/g' | sed 's/\//%2F/g')
-            
-            # Exchange OIDC token for npm registry token
-            RESPONSE=$(curl -s -X POST \
-              "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${ENCODED_PACKAGE_NAME}" \
-              -H "Authorization: Bearer ${OIDC_TOKEN}" \
-              -H "Content-Type: application/json")
-            
-            echo "Token exchange response received"
-            
-            # Extract npm token from response
-            NPM_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
-            
-            if [ "$NPM_TOKEN" = "null" ] || [ -z "$NPM_TOKEN" ]; then
-              echo "Failed to get npm token. Response:"
-              echo "$RESPONSE" | jq '.'
-              exit 1
-            fi
-            
-            echo "Successfully obtained npm token"
-            
-            # Configure npm to use the token
-            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-      
-      - run:
-          name: "Publish to npm"
-          command: |
             # Bump version for each publish (using build number for uniqueness)
             npm version 0.0.${CIRCLE_BUILD_NUM} --no-git-tag-version --allow-same-version || true
             
-            # Publish the package
+            # Publish - npm CLI handles the token exchange automatically
             npm publish --access public
             
             echo "Successfully published @npm/trust-publish-test"
