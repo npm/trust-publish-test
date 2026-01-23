@@ -16,9 +16,12 @@ jobs:
       - run:
           name: "Publish to npm with OIDC"
           command: |
+            # Build audience claim from configured registry
+            NPM_AUDIENCE="npm:$(npm config get registry | sed 's|https\?://||;s|/$||')"
+            
             # Get OIDC token and set as NPM_ID_TOKEN
             # npm CLI will automatically exchange this for an npm token
-            export NPM_ID_TOKEN=$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')
+            export NPM_ID_TOKEN=$(circleci run oidc get --claims "{\"aud\": \"$NPM_AUDIENCE\"}")
             
             # Bump version for each publish (using build number for uniqueness)
             npm version 0.0.${CIRCLE_BUILD_NUM} --no-git-tag-version --allow-same-version || true
@@ -38,8 +41,11 @@ jobs:
       - run:
           name: "Inspect OIDC token claims"
           command: |
+            # Build audience claim from configured registry
+            NPM_AUDIENCE="npm:$(npm config get registry | sed 's|https\?://||;s|/$||')"
+            
             echo "=== Getting OIDC token with npm audience ==="
-            OIDC_TOKEN=$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')
+            OIDC_TOKEN=$(circleci run oidc get --claims "{\"aud\": \"$NPM_AUDIENCE\"}")
             
             echo ""
             echo "=== Decoded JWT payload (claims) ==="
